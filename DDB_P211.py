@@ -1,11 +1,22 @@
 """
 author: Jiatu Liu
 
+issues:
+    C:\Programfiles\Anaconda3-2020-07\envs\integration\lib\site-packages\pyqtgraph\
+        GraphicsScene\GraphicsScene.py:278: RuntimeWarning: Error sending hover event:
+    
+    WARNING:silx.opencl.common:Unable to import pyOpenCl. Please install it from: 
+        https://pypi.org/project/pyopencl
 notes:
-
+    doesn't apply to linux due to the difference between \\ and /
+        
 """
 
 import os
+import logging # this is interesting
+logging.getLogger('fabio').setLevel(logging.ERROR)
+logging.getLogger('pyFAI').setLevel(logging.ERROR)
+import re
 import glob
 import sys
 import traceback
@@ -13,8 +24,8 @@ import time
 import numpy as np
 np.seterr(divide = 'ignore') 
 # import h5py
-# import fabio
-import tifffile # can also handle tags
+import fabio
+# import tifffile # can also handle tags
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 import multiprocessing
@@ -200,7 +211,7 @@ class TabGraph():
         self.tabplot.scene().sigMouseMoved.connect(self.mouseMoved) # this is correct !
         self.tabplot.setLabel('bottom',methodobj.axislabel[self.label]['bottom'])
         self.tabplot.setLabel('left', methodobj.axislabel[self.label]['left'])
-        if methodobj.axislabel[self.label]['left'] != 'Data number':
+        if methodobj.axislabel[self.label]['left'] not in ['Data number', '<-- Data number --']:
             self.tabplot.addLegend(labelTextSize='9pt')
 
     def deltab(self, dockobj):
@@ -281,9 +292,9 @@ class TabGraph():
                     methodobj.parawidgets[tabname][key] = QSlider(Qt.Horizontal)
                     tempwidget = methodobj.parawidgets[tabname][key]
                     tempwidget.setObjectName(key)
-                    tempwidget.setRange(0, (temppara.upper - temppara.lower) / temppara.step)
+                    tempwidget.setRange(0, int((temppara.upper - temppara.lower) / temppara.step))
                     # tempwidget.setSingleStep(temppara.step)
-                    tempwidget.setValue((temppara.setvalue - temppara.lower) / temppara.step)
+                    tempwidget.setValue(int((temppara.setvalue - temppara.lower) / temppara.step))
                     tempwidget.valueChanged.connect(winobj.update_parameters)
                     methodobj.paralabel[tabname][key] = QLabel(key + ':' + '{:.1f}'.format(temppara.setvalue))
                 else:
@@ -336,8 +347,8 @@ class TabGraph():
 
 class Methods_Base():
     def __init__(self):
-        self.threadpool = QThreadPool()
-        print("Multithreading with maximum %d threads" % self.threadpool.maxThreadCount())
+        # self.threadpool = QThreadPool()
+        # print("Multithreading with maximum %d threads" % self.threadpool.maxThreadCount())
         self.slider = QSlider(Qt.Horizontal) # each methodobj has a slider and sliderlabel
         self.sliderlabel = QLabel()
         self.slider_v = 0
@@ -372,8 +383,14 @@ class Methods_Base():
         self.linedit = {}
         self.paralabel = {} # control para labels widget
         self.process_started = False
-        self.maxhue = 100  # 100 colorhues
-        self.huestep = 3 # color rotation increment
+        self.maxhue = 50  # 100 colorhues
+        self.huestep = 2 # color rotation increment
+        # self.data_num = 0 # to do: maybe a list collect all data?
+        self.int_data = {}
+        self.raw_data = {}
+        # self.ts_list = [] # may put somewhere else
+        # self.ts_text = [] # this has caused the fatal error: Windows access violation
+    
 
     def plot_pointer(self, tabname, p_x, p_y, symbol, size):
         self.data_timelist[0][tabname]['pointer'].data = np.array([[p_x], [p_y]]).transpose()
@@ -397,8 +414,8 @@ class Methods_Base():
             nstep = 0
             for subkey in self.data_timelist[0][key]:
                 if self.data_timelist[0][key][subkey].pen is not None:
-                    self.data_timelist[0][key][subkey].pen = pg.mkPen(pg.intColor(nstep * self.huestep, self.maxhue),
-                                                                  width=1.5)
+                    pen = pg.mkPen(pg.intColor(nstep * self.huestep, self.maxhue), width=1.5)
+                    self.data_timelist[0][key][subkey].pen = pen
                     nstep += 1
 
             self.data_process(False)
@@ -435,14 +452,14 @@ class Methods_Base():
             self.checksdict[key].stateChanged.connect(winobj.graph_tab)
             winobj.subcboxverti[method].addWidget(self.checksdict[key])
 
-        self.btn_start = QPushButton('start process(Ctrl+1)')
-        self.btn_start.setShortcut('Ctrl+1')
-        self.btn_start.clicked.connect(self.process_start)
-        self.btn_stop = QPushButton('stop process(Ctrl+0)')
-        self.btn_stop.setShortcut('Ctrl+0')
-        self.btn_stop.clicked.connect(self.process_stop)
-        winobj.subcboxverti[method].addWidget(self.btn_start)
-        winobj.subcboxverti[method].addWidget(self.btn_stop)
+        self.btn_dynamic = QPushButton('int. w. watchdog (Ctrl+1)')
+        self.btn_dynamic.setShortcut('Ctrl+1')
+        self.btn_dynamic.clicked.connect(lambda: self.int_dynamic(winobj))
+        self.btn_static = QPushButton('int. w/o watchdog (Ctrl+2)')
+        self.btn_static.setShortcut('Ctrl+2')
+        self.btn_static.clicked.connect(lambda: self.int_static(winobj))
+        winobj.subcboxverti[method].addWidget(self.btn_dynamic)
+        winobj.subcboxverti[method].addWidget(self.btn_static)
         self.itemspacer = QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding)
         winobj.subcboxverti[method].addItem(self.itemspacer)
 
@@ -451,18 +468,19 @@ class Methods_Base():
             if self.checksdict[key].isChecked(): self.checksdict[key].setChecked(False)
             winobj.subcboxverti[method].removeWidget(self.checksdict[key])
 
-        self.btn_start.setParent(None)
-        self.btn_stop.setParent(None)
-        winobj.subcboxverti[method].removeWidget(self.btn_start)
-        winobj.subcboxverti[method].removeWidget(self.btn_stop)
+        self.btn_dynamic.setParent(None)
+        self.btn_static.setParent(None)
+        winobj.subcboxverti[method].removeWidget(self.btn_dynamic)
+        winobj.subcboxverti[method].removeWidget(self.btn_static)
         winobj.subcboxverti[method].removeItem(self.itemspacer)
         # winobj.delslider()  # del the slider # to do: may be need to del the slider?
         self.checksdict = {}
         
         
-    def process_start(self):
-        if not self.process_started:
-            self.process_started = True
+    def int_dynamic(self, winobj):
+        if self.btn_dynamic.text() == 'int. w. watchdog (Ctrl+1)':
+        # if not self.process_started:
+        #     self.process_started = True
             # self.manager = multiprocessing.Manager()
             # self.manager_list = self.manager.list([])
             self.manager_list = [] # to do: populate with what is already there...
@@ -481,39 +499,147 @@ class Methods_Base():
             # self.int_workers.append(multiprocessing.Process(target=self.integration_worker,
                                                             # args=(self.manager_list,)))
             # self.int_workers[-1].start()
-            worker = Worker(self.integration_worker)
-            worker.signals.finished.connect(self.thread_complete)
-            self.threadpool.start(worker)
+            
+            # to do: maybe put somewhere else
+            if not self.checksdict['time series'].isChecked():
+                self.checksdict['time series'].setChecked(True)
+            
+            if not self.curvedict['time series']['pointer'].isChecked():
+                self.curvedict['time series']['pointer'].setChecked(True)
+                
+            # pw = winobj.gdockdict[self.slider.objectName()].tabdict['time series'].tabplot
+            # pr = int(self.parameters['time series']['plot range'].setvalue)
+            if not hasattr(self, 'ts_list'):
+                self.ts_list = {} # may put somewhere else
+            #     self.ts_text = [] # this has caused the fatal error: Windows access violation
+            
+            # for i in range(pr):
+            #     self.ts_list.append(pw.plot(name=f'ts_curve_{i}'))
+                # self.ts_text.append(pg.TextItem(''))
+                # pw.addItem(self.ts_text[-1])
+                # self.ts_text[-1].setPos(i/10,i/10)
+                
+            # it's pity that if you setPos(0,0), the graph will go crazy!!!
+            # pw.setXRange(0, 1)
+            # pw.setYRange(0, 1)
+            
+            self.worker = Worker(self.integration_worker, winobj) 
+            # self.worker = Worker(self.integration_worker(winobj)) 
+            # this will result in TyperError: 'NoneType' object is not callable
+            self.worker.signals.finished.connect(self.thread_complete)
+            winobj.threadpool.start(self.worker)
             print('int. started...')
-        
-        
-    def process_stop(self):
-        if self.process_started:
-            self.process_started = False
-            # self.int_workers[-1].join()
-            # self.int_workers.pop(-1)
-            # self.threadpool.stop()
-            print('int. stopped')
+            self.btn_dynamic.setText('stop int. & watchdog (Ctrl+0)')
+            self.btn_dynamic.setShortcut('Ctrl+0')
+            
+        # if self.process_started:
+        #     self.process_started = False
+            # the while loop stops the integration intrinsically
+        else:
             self.observer.stop()
             print('watchdog stopped')
+            self.btn_dynamic.setText('int. w. watchdog (Ctrl+1)')
+            self.btn_dynamic.setShortcut('Ctrl+1')
     
     
     def thread_complete(self):
-        print('thread(s) done...')
+        print('the thread stopped')
     
     
-    def integration_worker(self):
+    def data_scale_ts(self, x_axis, scale, data):
+        if x_axis == 'q': x = data[0,:]
+        if x_axis == '2th': x = np.arcsin(data[0,:] * self.wavelength / 4 / np.pi) * 2 / np.pi * 180
+        if x_axis == 'd': x = np.pi * 2 / data[0,:]
+        if scale == 'log10': y = np.log10(data[1,:])        
+        if scale == 'sqrt': y = np.sqrt(data[1,:])
+        if scale == 'linear': y = data[1,:]
+        return np.array([x, y])
+        
+    
+    def integration_worker(self, winobj):
         # while len(self.manager_list) > 0: # this does not work when the folder is empty
         # to do: creat folder if not exist
-        while self.process_started:
+        # while self.process_started:
+        pts = self.parameters['time series']
+        pw = winobj.gdockdict[self.slider.objectName()].tabdict['time series'].tabplot
+        ps = pts['plot spacing'].setvalue
+        pr = int(pts['plot range'].setvalue)
+        while self.btn_dynamic.text() == 'stop int. & watchdog (Ctrl+0)':
             if len(self.manager_list) > 0:
-                print('pop ' + self.manager_list[-1])
-                self.manager_list.pop(-1)
-                print('working...')
-                time.sleep(1)
-                print('after int.', self.manager_list, sep='\n')
+                print(' working on ' + self.manager_list[0])
+                int_success, q, I = self.int_pyfai(self.manager_list[0])
+                if int_success:
+                    self.ts_list[self.manager_list[0]] = pw.plot(name=self.manager_list[0].split('\\')[-1])
+                    self.int_data[self.manager_list[0]] = np.array([q, I])
+                    self.manager_list.pop(0)
+                    L = len(self.int_data) - 1
+                    if L > 0: # set range to 0,0 may not work
+                        self.slider.setRange(0, L)
+                        self.slider.setValue(L)
+                    
+                    # update time series
+                    if pts['content'].choice == 'int.':
+                        if pts['plot style'].choice == 'waterfall':
+                            data_list = sorted(self.int_data.keys())
+                            # plot_len = min([len(self.ts_list), len(data_list)])
+                            for i in range(len(data_list)): # repeatedly erase and set new data for curves
+                                data = self.data_scale_ts(pts['x axis'].choice, 
+                                                          pts['scale'].choice, 
+                                                          self.int_data[data_list[-1 - i]])
+                                pen = pg.mkPen(pg.intColor(i * self.huestep, self.maxhue), width=1.5)
+                                self.ts_list[data_list[-1 - i]].setData(data[0, :], data[1, :] - i * ps, pen=pen)
+                                
+                            pw.setYRange(data[1,:].min() - ps * pr, data[1,:].max()) # work?
+                                # self.ts_list[i].setData(data[0, :], data[1, :] - step, pen=pen)
+                                # print('did you crash here')
+                                # self.ts_text[i].setText(data_list[-1 - i].split('\\')[-1])
+                                # self.ts_text[i].setPos(data[0, -1], data[1, -1] - step)
+                                # self.ts_list[i].setName... # no such thing called setName!!!
+                                # below not working, no order
+                                # step = self.int_data[-1 - i][1,:].max() / 20 * i # may change?
+                                # self.ts_list[i].setData(self.int_data[-1 - i][0,:],
+                                #                         self.int_data[-1 - i][1,:] - step) # really?
+                                        
+
+    def int_pyfai(self, data_file):
+        if hasattr(self, 'ai'):
+            out_file = os.path.join(self.directory, 'processed', 
+                                    data_file.split('\\')[-1].split('.')[0] + '.'
+                                    + self.intfile.split('\\')[-1].split('.')[-1])
+            
+            if self.mask.split('.')[-1] in ['npy']: # to do: more scenario
+                mask_file = np.load(self.mask)
+            elif self.mask.split('.')[-1] in ['tif','edf']: # to do: more types?
+                mask_file = fabio.open(self.mask).data
             else:
-                print('int. worker waiting...')
+                print('can not read in mask, int. w/o mask')
+                
+            # if 1: # overwrite mode? or not able to intrinsically
+            if not os.path.isfile(out_file): # not overwrite 
+                print(f'output file as {out_file}')
+                q, I = self.ai.integrate1d( # to do: collect q, I
+                    fabio.open(data_file).data, 
+                    self.int_bins, 
+                    filename=out_file, 
+                    polarization_factor=0.99, 
+                    mask=mask_file,
+                    correctSolidAngle=True, 
+                    unit='q_A^-1', 
+                    method='nosplit_csr',
+                    )
+                
+                return True, q, I
+            
+        else:
+            return False, None, None
+        
+
+    def int_static(self, winobj):
+        for rawfile in sorted(glob.glob(self.rawfilename)):
+            if os.path.isfile(rawfile):
+                int_success = self.int_pyfai(self.manager_list[-1])
+                if int_success:
+                    print('one file done')
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -528,12 +654,18 @@ class NewFileHandler(FileSystemEventHandler):
         pass
 
     def on_created(self, event):
-        self.methodobj.manager_list.append(event.src_path)
-        print(event.src_path + ' found by watchdog')
-        list_len = len(self.methodobj.manager_list)
-        print(f'{list_len} file(s) we have now')
-        self.methodobj.slider.setRange(0,list_len - 1)
-
+        # to do: either glob or regex
+        # if re.match(self.methodobj.rawfilename.split('\\')[-1],
+        #             event.src_path.split('\\')[-1]):
+        if event.src_path in glob.glob(self.methodobj.rawfilename):
+            self.methodobj.manager_list.append(event.src_path)
+            print(event.src_path + ' found by watchdog')
+            # prevent warning: invalid value encountered in log10
+            data = fabio.open(event.src_path).data
+            data[data < 0] = data[data > 0].min()
+            self.methodobj.raw_data[event.src_path] = data
+            
+    
 
 
 class TOT_general(Methods_Base):
@@ -546,7 +678,7 @@ class TOT_general(Methods_Base):
         self.availablecurves['S(Q)'] = ['Sm(Q)', '<font> I(Q)/&lt; f &gt; </font> <sup> 2 </sup>', 
                                         '</font> &lt; f &gt; <sup> 2 </sup> /&lt; f &gt; </font> <sup> 2 </sup>']
         self.availablecurves['F(Q)'] = ['Fm(Q)', 'QPn(Q)']
-        self.availablecurves['G(r)'] = ['g(r), G(r), R(r), N(r)']
+        self.availablecurves['G(r)'] = ['g(r)', 'G(r)', 'R(r)', 'N(r)']
         self.directory = path_name_widget['directory'].text()
         self.rawfilename = self.directory + path_name_widget['raw pattern'].text() # to do: there is no fileshort now
         self.dark = self.directory + path_name_widget['dark file'].text() # to do: can be only one, or one for each image
@@ -555,8 +687,13 @@ class TOT_general(Methods_Base):
         self.intfile = self.directory + path_name_widget['int. pattern'].text()
         # self.intfile_appendix = path_name_widget['result appendix'].text() # to do: this may only serve different way of int.
         self.ponifile = self.directory + path_name_widget['PONI file'].text()
+        self.int_bins = int(path_name_widget['int. bins'].text())
         print(self.ponifile)
         if os.path.isfile(self.ponifile): # to do: is this step necessary
+            # self.ai = pyFAI.azimuthalIntegrator.AzimuthalIntegrator()
+            # module 'pyFAI' has no attribute 'azimuthalIntegrator'
+            self.ai = pyFAI.AzimuthalIntegrator()
+            self.ai.load(self.ponifile)
             with open(self.ponifile, 'r') as f:
                 self.wavelength = 1e10 * float(f.readlines()[-1].splitlines()[0].partition(' ')[2]) # now in Angstrom
                 print(f'wavelength read in as {self.wavelength} Angstrom')
@@ -579,8 +716,12 @@ class TOT_general(Methods_Base):
                                                    '<font> 2 &#952; / </font> <sup> o </sup>, or'
                                                    '<font> d / &#8491; </font>',
                                         'left': 'Intensity'},
-                          'time series': {'bottom': '<font> r / &#8491; </font>',
-                                        'left': 'Data number'},
+                          'time series': {'bottom': '<font> q / &#8491; </font> <sup> -1 </sup>,'
+                                                   '<font> 2 &#952; / </font> <sup> o </sup>, or'
+                                                   '<font> d / &#8491; </font>',
+                                        'left': '<-- Data number --'},
+                          # 'time series': {'bottom': '<font> r / &#8491; </font>',
+                          #               'left': 'Data number'},
                           'S(Q)': {'bottom': '<font> q / &#8491; </font> <sup> -1 </sup>',
                                    'left': 'Intensity'},
                           'F(Q)': {'bottom': '<font> q / &#8491; </font> <sup> -1 </sup>',
@@ -591,25 +732,31 @@ class TOT_general(Methods_Base):
 
         self.ini_data_curve_color()
 
-        # note that these parameter boundaries can be changed
-        self.bravaisNames = ['Cubic-F', 'Cubic-I', 'Cubic-P', 'Trigonal-R', 'Trigonal/Hexagonal-P', # 5
-                             'Tetragonal-I', 'Tetragonal-P', 'Orthorhombic-F', 'Orthorhombic-I', 'Orthorhombic-A', # 5
-                             'Orthorhombic-B', 'Orthorhombic-C',
-                             'Orthorhombic-P', 'Monoclinic-I', 'Monoclinic-A', 'Monoclinic-C', 'Monoclinic-P',
-                             'Triclinic']
-
         self.parameters = {'integrated': {'scale': Paraclass(strings=('log10', ['log10', 'sqrt', 'linear'])),
                                           'x axis': Paraclass(strings=('q',['q','2th','d'])),
-                                          }
+                                          },
+                           'time series': {'scale': Paraclass(strings=('log10', ['log10', 'sqrt', 'linear'])),
+                                           'x axis': Paraclass(strings=('q',['q','2th','d'])),
+                                           'plot style': Paraclass(strings=('waterfall',['waterfall','heatmap'])),
+                                           'content':Paraclass(strings=('int.',['int.','F(Q)','G(r)'])),
+                                           'plot range': Paraclass(values=(10,1,int(self.maxhue / self.huestep),1)),
+                                           'plot spacing': Paraclass(values=(.1,0,int(self.maxhue / self.huestep),.1)),
+                                           },
                            }
         
-        self.actions = {}
+        self.actions = {'time series':{'update plot (Ctrl+U)':self.update_ts,
+                                       },
+                        }
         
         self.linedit = {'raw':{'color max':'5'
                                },
                         }
 
-
+    def update_ts(self):
+        pass
+        
+    
+    
     def data_scale(self, mode, sub_mode, data_x, data_y):  # for data_process
         if self.parameters[mode]['x axis'].choice == 'q':
             data_x = data_x
@@ -634,19 +781,25 @@ class TOT_general(Methods_Base):
         # raw
         if 'image' in self.curve_timelist[0]['raw']:
             self.colormax = float(self.linewidgets['raw']['color max'].text())
-            rawfiles = sorted(glob.glob(self.rawfilename))
+            rawfiles = sorted(glob.glob(self.rawfilename)) # to do : alternatinve: self.raw_data
             if len(rawfiles) >= self.slider_v: # not empty
+            # if len(self.raw_data) >= self.slider_v: # not empty
                 self.dynamictitle = rawfiles[self.slider_v].split('\\')[-1]
                 self.data_timelist[0]['raw']['image'].image = \
-                    pg.ImageItem(image=np.log10(tifffile.imread(rawfiles[self.slider_v])))
+                    pg.ImageItem(image=np.log10(self.raw_data[rawfiles[self.slider_v]])) # faster?
+                    
+                    # pg.ImageItem(image=np.log10(fabio.open(rawfiles[self.slider_v]).data)) # to do not able to open?
+                    
+                    # pg.ImageItem(image=np.log10(tifffile.imread(rawfiles[self.slider_v])))
                     
                 
                 # print('image loaded')
 
         # integrated
         if 'original' in self.curve_timelist[0]['integrated']:
-            intfiles = sorted(glob.glob(self.intfile))
+            intfiles = sorted(glob.glob(self.intfile)) # to do : alternatinve: self.int_data
             if len(intfiles) >= self.slider_v: # two occasions: q/A^-1 or 2th_deg
+            # if len(self.int_data) >= self.slider_v: # not empty
                 self.dynamictitle = intfiles[self.slider_v].split('\\')[-1]
                 intdata = np.loadtxt(intfiles[self.slider_v])
                 d_x = []
@@ -662,7 +815,29 @@ class TOT_general(Methods_Base):
                 if len(d_x) > 0:
                     # print('plot' + line[1:])
                     self.data_scale('integrated', 'original', d_x, intdata[:,1])
-                            
+
+        # time series
+        if 'pointer' in self.curve_timelist[0]['time series']:
+            intfiles = sorted(self.int_data.keys()) # to do: what if the process is interrupted and the slider value is larger
+            if len(intfiles) >= self.slider_v: # two occasions: q/A^-1 or 2th_deg
+                self.dynamictitle = intfiles[self.slider_v].split('\\')[-1]
+                intdata = np.loadtxt(intfiles[self.slider_v])
+            
+            pts = self.parameters['time series']
+            ps = pts['plot spacing'].setvalue
+            if pts['content'].choice == 'int.':
+                if pts['plot style'].choice == 'waterfall':
+                    data = self.data_scale_ts(pts['x axis'].choice, 
+                                              pts['scale'].choice, 
+                                              intdata.T)
+                    dts = self.data_timelist[0]['time series']['pointer']
+                    dts.data = np.array([data[0,:], 
+                                         data[1,:] - (len(intfiles) - self.slider_v) * ps]).transpose()
+                    dts.pen = None
+                    dts.symbolsize = 10
+                    dts.symbolBrush = 'k'
+                    dts.symbol = '+'
+
 
 
 class XRD_general():
@@ -673,7 +848,8 @@ class XRD_general():
 class ShowData(QMainWindow):
     def __init__(self):
         super(ShowData, self).__init__()
-
+        self.threadpool = QThreadPool() # all methods share this threadpool
+        print("Multithreading with maximum %d threads" % self.threadpool.maxThreadCount())
         myscreen = app.primaryScreen()
         self.screen_height = myscreen.geometry().height()
         self.screen_width = myscreen.geometry().width()
@@ -739,12 +915,13 @@ class ShowData(QMainWindow):
 
         self.pn_dict = {}
         self.pn_dict['tot'] = {'directory':r'D:\test_folder', 
-                          'raw pattern':r'\raw\combined_3_ts*[0-9].tif',
-                          'dark file':'',
-                          'int. pattern':'', 
-                          'mask file':'',
-                          'PONI file':'',
-                          'config file':'',
+                          'raw pattern':r'\raw\combined_3_xrd*[0-9].tif',
+                          'dark file':r'\raw\combined_3_xrd*[0-9].dark.tif',
+                          'int. pattern':r'\processed\combined_3_xrd*[0-9].dat',
+                          'mask file':r'\processed\scripts\new_mask_2.edf',
+                          'PONI file':r'\processed\scripts\LaB6_1_new_m2.poni',
+                          'int. bins':'1400',
+                          'config file':r'.cfg',
                           }
         
         self.pn_dict['xrd'] = {'directory':r'Z:\p21.1\2023\data\11017043', 
@@ -753,6 +930,7 @@ class ShowData(QMainWindow):
                           'int. pattern':r'\processed\RHEA_16_575_integrated\combined_3_ts*[0-9].dat',
                           'mask file':r'\processed\scripts\new_mask_2.edf',
                           'PONI file':r'\processed\scripts\LaB6_1_new_m2.poni',
+                          'int. bins':'1400',
                           'config file':r'\shared\xPDFsuite\xPDFsuite_RHEA_16_575.cfg',
                           }
     
@@ -946,9 +1124,10 @@ class ShowData(QMainWindow):
                 
 
     def update_parameters(self, widgetvalue):
+        # rewrite this part!!!
         if self.slideradded == False: # a way to prevent crash; may not the best way
             self.setslider()
-            self.slider.setValue(self.slider.minimum() + 1) # this works!!!
+            self.slider.setValue(self.slider.minimum() + 1) # this will not work!!!
             self.slideradded = True
 
         parawidget = self.sender() # rbkg, kmin,...
@@ -1011,7 +1190,22 @@ class ShowData(QMainWindow):
             if subkey == 'refinement single':
                 self.gdockdict[key].tabdict[subkey].tabplot.setTitle(
                     self.methodict[key].refinedata[self.methodict[key].parameters[subkey]['data number'].setvalue])
-                
+            
+            if subkey == 'time series': # only update view range
+                pts = self.methodict[key].parameters['time series']
+                if pts['content'].choice == 'int.':
+                    if pts['plot style'].choice == 'waterfall':
+                        pw = self.gdockdict[key].tabdict['time series'].tabplot
+                        data_list = sorted(self.methodict[key].int_data.keys())
+                        sv = self.methodict[key].slider_v
+                        ps = pts['plot spacing'].setvalue
+                        pr = int(pts['plot range'].setvalue)
+                        data = self.methodict[key].data_scale_ts(pts['x axis'].choice, 
+                                                                 pts['scale'].choice, 
+                                                                 self.methodict[key].int_data[data_list[sv]])
+                        pw.setYRange(data[1,:].min() - (pr + len(data_list) - sv) * ps, 
+                                     data[1,:].max() - (pr + len(data_list) - sv) * ps)
+            
             for timelist in range(len(self.methodict[key].curve_timelist)): # timelist: 0, 1,...
                 for entry in self.methodict[key].curve_timelist[timelist][subkey]: # I0, I1,...
                     curveobj = self.methodict[key].curve_timelist[timelist][subkey][entry]
@@ -1045,3 +1239,5 @@ if __name__ == '__main__':
     w = ShowData()
     w.show()
     sys.exit(app.exec_())
+
+
