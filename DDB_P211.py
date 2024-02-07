@@ -562,15 +562,29 @@ class Methods_Base():
         # while self.process_started:
         pts = self.parameters['time series']
         pw = winobj.gdockdict[self.slider.objectName()].tabdict['time series'].tabplot
-        ps = pts['plot spacing'].setvalue
+        ps = float(pts['plot spacing'].setvalue)
         pr = int(pts['plot range'].setvalue)
         while self.btn_dynamic.text() == 'stop int. & watchdog (Ctrl+0)':
             if len(self.manager_list) > 0:
                 print(' working on ' + self.manager_list[0])
-                int_success, q, I = self.int_pyfai(self.manager_list[0])
+                sub_dir = self.intfile.split('\\')
+                out_file = os.path.join(sub_dir[0], os.sep, sub_dir[1])
+                for sd in sub_dir[2:-1]:
+                    out_file = os.path.join(out_file, sd)    
+                    if not os.path.isdir(out_file):
+                        os.mkdir(out_file)
+                        print('mkdir: ' + out_file)
+                
+                out_file = os.path.join(out_file, 
+                                        self.manager_list[0].split('\\')[-1].split('.')[0] + '.'
+                                        + self.intfile.split('\\')[-1].split('.')[-1])
+                print('aim to output as: ' + out_file)
+                
+                int_success, q, I = self.int_pyfai(self.manager_list[0], out_file)
+                
                 if int_success:
-                    self.ts_list[self.manager_list[0]] = pw.plot(name=self.manager_list[0].split('\\')[-1])
-                    self.int_data[self.manager_list[0]] = np.array([q, I])
+                    self.ts_list[out_file] = pw.plot(name=out_file.split('\\')[-1])
+                    self.int_data[out_file] = np.array([q, I])
                     self.manager_list.pop(0)
                     L = len(self.int_data) - 1
                     if L > 0: # set range to 0,0 may not work
@@ -580,40 +594,43 @@ class Methods_Base():
                     # update time series
                     if pts['content'].choice == 'int.':
                         if pts['plot style'].choice == 'waterfall':
-                            data_list = sorted(self.int_data.keys())
-                            # plot_len = min([len(self.ts_list), len(data_list)])
-                            for i in range(len(data_list)): # repeatedly erase and set new data for curves
-                                data = self.data_scale_ts(pts['x axis'].choice, 
-                                                          pts['scale'].choice, 
-                                                          self.int_data[data_list[-1 - i]])
+                            # method 1, add new data according to data number
+                            data = self.data_scale_ts(pts['x axis'].choice, 
+                                                      pts['scale'].choice, 
+                                                      self.int_data[out_file])
+                            i = out_file.split('.')[-2].split('-')[-1]
+                            if i.isnumeric():
+                                i = int(i)
                                 pen = pg.mkPen(pg.intColor(i * self.huestep, self.maxhue), width=1.5)
-                                self.ts_list[data_list[-1 - i]].setData(data[0, :], data[1, :] - i * ps, pen=pen)
+                                self.ts_list[out_file].setData(data[0, :], data[1, :] + i * ps, pen=pen)
+                                pw.setYRange(data[1,:].min() - ps * pr + i * ps, 
+                                             data[1,:].max() + i * ps)
+                            else:
+                                print('the name does not have a regular format to get the series number')
+                            
+                            # method 2, repeatedly erase and set new data for curves
+                            # data_list = sorted(self.int_data.keys())
+                            # for i in range(len(data_list)): # repeatedly erase and set new data for curves
+                            #     data = self.data_scale_ts(pts['x axis'].choice, 
+                            #                               pts['scale'].choice, 
+                            #                               self.int_data[data_list[-1 - i]])
+                            #     pen = pg.mkPen(pg.intColor(i * self.huestep, self.maxhue), width=1.5)
+                            #     self.ts_list[data_list[-1 - i]].setData(data[0, :], data[1, :] - i * ps, pen=pen)
                                 
-                            pw.setYRange(data[1,:].min() - ps * pr, data[1,:].max()) # work?
-                                # self.ts_list[i].setData(data[0, :], data[1, :] - step, pen=pen)
-                                # print('did you crash here')
-                                # self.ts_text[i].setText(data_list[-1 - i].split('\\')[-1])
-                                # self.ts_text[i].setPos(data[0, -1], data[1, -1] - step)
-                                # self.ts_list[i].setName... # no such thing called setName!!!
-                                # below not working, no order
-                                # step = self.int_data[-1 - i][1,:].max() / 20 * i # may change?
-                                # self.ts_list[i].setData(self.int_data[-1 - i][0,:],
-                                #                         self.int_data[-1 - i][1,:] - step) # really?
-                                        
+                            # pw.setYRange(data[1,:].min() - ps * pr, data[1,:].max()) # work?
+                                
+                    # self.manager_list.pop(0)
+                    
 
-    def int_pyfai(self, data_file):
-        if hasattr(self, 'ai'):
-            out_file = os.path.join(self.directory, 'processed', 
-                                    data_file.split('\\')[-1].split('.')[0] + '.'
-                                    + self.intfile.split('\\')[-1].split('.')[-1])
-            
+    def int_pyfai(self, data_file, out_file):
+        if hasattr(self, 'ai'):           
             if self.mask.split('.')[-1] in ['npy']: # to do: more scenario
                 mask_file = np.load(self.mask)
             elif self.mask.split('.')[-1] in ['tif','edf']: # to do: more types?
                 mask_file = fabio.open(self.mask).data
             else:
                 print('can not read in mask, int. w/o mask')
-                
+            
             # if 1: # overwrite mode? or not able to intrinsically
             if not os.path.isfile(out_file): # not overwrite 
                 print(f'output file as {out_file}')
@@ -635,11 +652,12 @@ class Methods_Base():
         
 
     def int_static(self, winobj):
-        for rawfile in sorted(glob.glob(self.rawfilename)):
-            if os.path.isfile(rawfile):
-                int_success = self.int_pyfai(self.manager_list[-1])
-                if int_success:
-                    print('one file done')
+        pass
+        # for rawfile in sorted(glob.glob(self.rawfilename)):
+        #     if os.path.isfile(rawfile):
+        #         int_success = self.int_pyfai(self.manager_list[-1])
+        #         if int_success:
+        #             print('one file done')
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -739,7 +757,7 @@ class TOT_general(Methods_Base):
                                            'x axis': Paraclass(strings=('q',['q','2th','d'])),
                                            'plot style': Paraclass(strings=('waterfall',['waterfall','heatmap'])),
                                            'content':Paraclass(strings=('int.',['int.','F(Q)','G(r)'])),
-                                           'plot range': Paraclass(values=(10,1,int(self.maxhue / self.huestep),1)),
+                                           'plot range': Paraclass(values=(1,1,int(self.maxhue / self.huestep),1)),
                                            'plot spacing': Paraclass(values=(.1,0,int(self.maxhue / self.huestep),.1)),
                                            },
                            }
@@ -821,22 +839,27 @@ class TOT_general(Methods_Base):
             intfiles = sorted(self.int_data.keys()) # to do: what if the process is interrupted and the slider value is larger
             if len(intfiles) >= self.slider_v: # two occasions: q/A^-1 or 2th_deg
                 self.dynamictitle = intfiles[self.slider_v].split('\\')[-1]
-                intdata = np.loadtxt(intfiles[self.slider_v])
+                # intdata = np.loadtxt(intfiles[self.slider_v])
             
             pts = self.parameters['time series']
-            ps = pts['plot spacing'].setvalue
+            ps = float(pts['plot spacing'].setvalue)
             if pts['content'].choice == 'int.':
                 if pts['plot style'].choice == 'waterfall':
                     data = self.data_scale_ts(pts['x axis'].choice, 
                                               pts['scale'].choice, 
-                                              intdata.T)
+                                              self.int_data[intfiles[self.slider_v]])
                     dts = self.data_timelist[0]['time series']['pointer']
-                    dts.data = np.array([data[0,:], 
-                                         data[1,:] - (len(intfiles) - self.slider_v) * ps]).transpose()
-                    dts.pen = None
-                    dts.symbolsize = 10
-                    dts.symbolBrush = 'k'
-                    dts.symbol = '+'
+                    # dts.data = np.array([data[0,:], 
+                    #                      data[1,:] - (len(intfiles) - self.slider_v) * ps]).transpose()
+                    # method 1, above method 2
+                    i = self.dynamictitle.split('.')[-2].split('-')[-1]
+                    if i.isnumeric():
+                        dts.data = np.array([data[0,:], 
+                                             data[1,:] + int(i) * ps]).transpose()
+                        dts.pen = None
+                        dts.symbolsize = 10
+                        dts.symbolBrush = 'k'
+                        dts.symbol = '+'
 
 
 
@@ -914,6 +937,16 @@ class ShowData(QMainWindow):
         read_mode_group.triggered.connect(self.ini_methods_cboxes)
 
         self.pn_dict = {}
+        self.pn_dict['xrd'] = {'directory':r'T:\current', 
+                          'raw pattern':r'\raw\pe\Jiatu_test\test*[0-9].raw.tif',
+                          'dark file':r'\raw\combined_3_xrd*[0-9].dark.tif',
+                          'int. pattern':r'\processed\pe\Jiatu_test\test*[0-9].dat',
+                          'mask file':r'\processed\mask_2p50std.npy',
+                          'PONI file':r'\processed\Ni_1mm-00002.poni',
+                          'int. bins':'1400',
+                          'config file':r'.cfg',
+                          }
+        
         self.pn_dict['tot'] = {'directory':r'D:\test_folder', 
                           'raw pattern':r'\raw\combined_3_xrd*[0-9].tif',
                           'dark file':r'\raw\combined_3_xrd*[0-9].dark.tif',
@@ -924,15 +957,15 @@ class ShowData(QMainWindow):
                           'config file':r'.cfg',
                           }
         
-        self.pn_dict['xrd'] = {'directory':r'Z:\p21.1\2023\data\11017043', 
-                          'raw pattern':r'\raw\pe\RHEA_16_575\combined_3_ts*[0-9].tif',
-                          'dark file':r'\raw\pe\RHEA_16_575\combined_3_ts*[0-9].dark.tif',
-                          'int. pattern':r'\processed\RHEA_16_575_integrated\combined_3_ts*[0-9].dat',
-                          'mask file':r'\processed\scripts\new_mask_2.edf',
-                          'PONI file':r'\processed\scripts\LaB6_1_new_m2.poni',
-                          'int. bins':'1400',
-                          'config file':r'\shared\xPDFsuite\xPDFsuite_RHEA_16_575.cfg',
-                          }
+        # self.pn_dict['xrd'] = {'directory':r'Z:\p21.1\2023\data\11017043', 
+        #                   'raw pattern':r'\raw\pe\RHEA_16_575\combined_3_ts*[0-9].tif',
+        #                   'dark file':r'\raw\pe\RHEA_16_575\combined_3_ts*[0-9].dark.tif',
+        #                   'int. pattern':r'\processed\RHEA_16_575_integrated\combined_3_ts*[0-9].dat',
+        #                   'mask file':r'\processed\scripts\new_mask_2.edf',
+        #                   'PONI file':r'\processed\scripts\LaB6_1_new_m2.poni',
+        #                   'int. bins':'1400',
+        #                   'config file':r'\shared\xPDFsuite\xPDFsuite_RHEA_16_575.cfg',
+        #                   }
     
     
     def ini_methods_cboxes(self, action):
@@ -1106,7 +1139,7 @@ class ShowData(QMainWindow):
 
     def update_timepoints(self, slidervalue): # slidervalue in ms !
         key = self.sender().objectName() # tot_, xrd_
-        # print(key)
+        # print(f'slidervalue {slidervalue}')
         self.methodict[key].sliderlabel.setText(str(slidervalue))
         try:
             self.methodict[key].data_update(slidervalue)
@@ -1198,13 +1231,17 @@ class ShowData(QMainWindow):
                         pw = self.gdockdict[key].tabdict['time series'].tabplot
                         data_list = sorted(self.methodict[key].int_data.keys())
                         sv = self.methodict[key].slider_v
-                        ps = pts['plot spacing'].setvalue
+                        ps = float(pts['plot spacing'].setvalue)
                         pr = int(pts['plot range'].setvalue)
                         data = self.methodict[key].data_scale_ts(pts['x axis'].choice, 
                                                                  pts['scale'].choice, 
                                                                  self.methodict[key].int_data[data_list[sv]])
-                        pw.setYRange(data[1,:].min() - (pr + len(data_list) - sv) * ps, 
-                                     data[1,:].max() - (pr + len(data_list) - sv) * ps)
+                        # method 2
+                        # pw.setYRange(data[1,:].min() - (pr + len(data_list) - sv) * ps, 
+                        #              data[1,:].max() - (pr + len(data_list) - sv) * ps)
+                        # method 1
+                        pw.setYRange(data[1,:].min() + (sv - pr) * ps, 
+                                     data[1,:].max() + sv * ps)
             
             for timelist in range(len(self.methodict[key].curve_timelist)): # timelist: 0, 1,...
                 for entry in self.methodict[key].curve_timelist[timelist][subkey]: # I0, I1,...
